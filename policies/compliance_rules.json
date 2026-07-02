@@ -1,12 +1,144 @@
 {
-  "invoice": [
-    {"id": "INV-01", "description": "Must contain a valid 15-digit GSTIN."},
-    {"id": "INV-02", "description": "Must have a clear 'Total Amount' visible."}
-  ],
-  "certificate": [
-    {"id": "CERT-01", "description": "Must mention 'FSSAI' and a registration number."}
-  ],
+  "_metadata": {
+    "version": "2.0.0",
+    "jurisdiction": "India / General International",
+    "description": "Compliance ruleset served by the MCP ComplianceRulesServer",
+    "last_updated": "2026-06-01",
+    "note": "Rules are loaded dynamically by the Auditor Agent via MCP tool calls"
+  },
+
   "general": [
-    {"id": "GEN-01", "description": "Document must not contain raw credit card numbers."}
+    {
+      "id": "GEN-01",
+      "description": "Document must not contain raw credit card numbers (PII violation).",
+      "severity": "CRITICAL",
+      "regulation": "PCI-DSS"
+    },
+    {
+      "id": "GEN-02",
+      "description": "Document must not expose unmasked Aadhaar numbers.",
+      "severity": "CRITICAL",
+      "regulation": "India IT Act 2000, UIDAI Guidelines"
+    },
+    {
+      "id": "GEN-03",
+      "description": "Document must have a clearly identifiable issuing party or organization.",
+      "severity": "MEDIUM",
+      "regulation": "General Best Practice"
+    },
+    {
+      "id": "GEN-04",
+      "description": "Document must include a date of issuance or effective date.",
+      "severity": "LOW",
+      "regulation": "General Best Practice"
+    }
+  ],
+
+  "invoice": [
+    {
+      "id": "INV-01",
+      "description": "Must contain a valid 15-digit GSTIN (Goods & Services Tax ID).",
+      "severity": "HIGH",
+      "regulation": "India GST Act 2017"
+    },
+    {
+      "id": "INV-02",
+      "description": "Must display a clear 'Total Amount Due' with currency.",
+      "severity": "HIGH",
+      "regulation": "India GST Invoice Rules"
+    },
+    {
+      "id": "INV-03",
+      "description": "Must include an invoice number for audit trail purposes.",
+      "severity": "MEDIUM",
+      "regulation": "India GST Invoice Rules"
+    },
+    {
+      "id": "INV-04",
+      "description": "Must specify HSN/SAC codes for all line items.",
+      "severity": "MEDIUM",
+      "regulation": "India GST Act 2017"
+    },
+    {
+      "id": "INV-05",
+      "description": "Must include both buyer and seller PAN or GSTIN details.",
+      "severity": "HIGH",
+      "regulation": "India Income Tax Act"
+    }
+  ],
+
+  "certificate": [
+    {
+      "id": "CERT-01",
+      "description": "Must mention 'FSSAI' and a valid FSSAI registration number.",
+      "severity": "CRITICAL",
+      "regulation": "India FSSAI Act 2006"
+    },
+    {
+      "id": "CERT-02",
+      "description": "Must specify the certificate validity period (start and expiry dates).",
+      "severity": "HIGH",
+      "regulation": "General Regulatory Best Practice"
+    },
+    {
+      "id": "CERT-03",
+      "description": "Must be signed or stamped by an authorized regulatory body.",
+      "severity": "HIGH",
+      "regulation": "General Regulatory Best Practice"
+    },
+    {
+      "id": "CERT-04",
+      "description": "Must include the name and address of the certified entity.",
+      "severity": "MEDIUM",
+      "regulation": "General Best Practice"
+    }
+  ],
+
+  "contract": [
+    {
+      "id": "CON-01",
+      "description": "Must include names and signatures of all contracting parties.",
+      "severity": "CRITICAL",
+      "regulation": "Indian Contract Act 1872"
+    },
+    {
+      "id": "CON-02",
+      "description": "Must specify the contract duration or effective/expiry dates.",
+      "severity": "HIGH",
+      "regulation": "Indian Contract Act 1872"
+    },
+    {
+      "id": "CON-03",
+      "description": "Must include a dispute resolution or jurisdiction clause.",
+      "severity": "MEDIUM",
+      "regulation": "Indian Contract Act 1872"
+    },
+    {
+      "id": "CON-04",
+      "description": "Must define the scope of work or deliverables clearly.",
+      "severity": "HIGH",
+      "regulation": "General Contract Law Best Practice"
+    }
+  ],
+
+  "report": [
+    {
+      "id": "REP-01",
+      "description": "Must include the reporting period covered by the report.",
+      "severity": "HIGH",
+      "regulation": "General Financial Reporting Standards"
+    },
+    {
+      "id": "REP-02",
+      "description": "Must be signed or approved by an authorized signatory.",
+      "severity": "HIGH",
+      "regulation": "General Corporate Governance"
+    },
+    {
+      "id": "REP-03",
+      "description": "Financial reports must follow applicable accounting standards (Ind AS / GAAP).",
+      "severity": "MEDIUM",
+      "regulation": "India Companies Act 2013"
+    }
   ]
 }
