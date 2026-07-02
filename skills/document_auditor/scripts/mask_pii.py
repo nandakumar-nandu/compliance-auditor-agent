@@ -108,7 +108,11 @@ class PrivacySkill:
         # Note: This runs AFTER Aadhaar to avoid eating 12-digit IDs
         (
             re.compile(
+<<<<<<< HEAD
                 r'\+?\d{1,4}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{4,9}\b'
+=======
+                r'\+?\d{1,3}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{1,4}[\s.\-]?\d{1,9}\b'
+>>>>>>> f46007343f32d4e607eec2394fe22e1d729d5051
             ),
             "[REDACTED_PHONE]"
         ),
