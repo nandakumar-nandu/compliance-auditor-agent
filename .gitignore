@@ -1,3 +1,50 @@
+# ============================================================
+# .gitignore — Smart Document Auditor
+# ============================================================
+
+# 🔐 SECURITY — NEVER commit these
 .env
+*.env
+.env.*
+!.env.example
+
+# 🗄️ Database files (runtime-generated)
+*.db
+*.sqlite
+*.sqlite3
+audit_logs.db
+
+# 📁 Temporary upload directory (runtime-generated)
+temp_uploads/
+
+# 🐍 Python artifacts
 __pycache__/
+*.py[cod]
+*$py.class
 *.pyc
+.pytest_cache/
+.ruff_cache/
+
+# 📦 Virtual environments
+.venv/
+venv/
+env/
+.uv/
+
+# 🐳 Docker
+*.dockerignore
+
+# 💻 IDE files
+.vscode/settings.json
+.idea/
+*.swp
+
+# 📊 Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+
+# 🏗️ Build artifacts
+dist/
+build/
+*.egg-info/

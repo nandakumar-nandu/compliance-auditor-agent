@@ -1,5 +1,0 @@
-TAX INVOICE
-Vendor: XYZ Corp
-GSTIN: 29GGGGG1314R9Z6
-Items: Office Chairs
-Total Amount: $500.00
