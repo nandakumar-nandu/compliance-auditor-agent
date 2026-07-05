@@ -17,16 +17,19 @@ import os
 import uuid
 import shutil
 import logging
+import io
+import datetime
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 # ── Internal Module Imports ───────────────────────────────────────────────────
 from database import get_db, AuditLog
 from audit_engine.swarm import ComplianceSwarm
 from audit_engine.validator import DocumentValidator
+from audit_engine.pdf_generator import PDFReportGenerator
 
 # ── Structured Logging Setup (Day 5: Observability) ──────────────────────────
 # Using structured logging instead of print() for production observability.
@@ -54,7 +57,7 @@ app = FastAPI(
     ),
     contact={
         "name": "Kaggle Capstone Project",
-        "url": "https://github.com/your-repo/compliance-auditor-agent"
+        "url": "https://github.com/nandakumar-nandu/compliance-auditor-agent"
     }
 )
 
@@ -245,20 +248,31 @@ async def upload_and_audit(
 @app.post("/api/audit/approve", tags=["Audit"])
 async def approve_pending_audit(
     session_id: str = Query(..., description="The session ID from the pending review response."),
+    override_status: str = Query(
+        default=None,
+        description="Optional: Force a status override ('COMPLIANT' or 'NON_COMPLIANT')."
+    ),
+    reviewer_notes: str = Query(
+        default=None,
+        description="Optional: Notes explaining the reviewer's decision or override reason."
+    ),
     db: Session = Depends(get_db)
 ):
     """
-    Human-in-the-Loop approval endpoint.
+    Human-in-the-Loop approval and override endpoint.
 
     After a HIGH/CRITICAL audit is flagged, a human reviewer calls this endpoint
-    to authorize the pipeline to continue and generate the final report.
+    to authorize committing the report to the database ledger. Optional parameters
+    allow the human to override the AI swarm's verdict and add review notes.
 
     Args:
         session_id (str): The unique session ID returned by the upload endpoint.
-        db (Session): Injected SQLAlchemy database session.
+        override_status (str): Force status to COMPLIANT or NON_COMPLIANT.
+        reviewer_notes (str): Reviewer justification notes.
+        db (Session): Injected database session.
 
     Returns:
-        dict: The completed audit report after human approval.
+        dict: The committed audit report.
     """
     # Check if the session exists in our pending store
     if session_id not in pending_reviews:
@@ -273,22 +287,62 @@ async def approve_pending_audit(
     cached = pending_reviews.pop(session_id)
     result = cached["result"]
 
+    # Apply human overrides if provided
+    final_status = result["status"]
+    final_severity = result.get("severity", "HIGH")
+    
+    human_review_meta = None
+    if override_status:
+        # Validate override input
+        override_status_upper = override_status.upper()
+        if override_status_upper not in ["COMPLIANT", "NON_COMPLIANT"]:
+            raise HTTPException(
+                status_code=400,
+                detail="override_status must be either 'COMPLIANT' or 'NON_COMPLIANT'."
+            )
+        
+        final_status = override_status_upper
+        # If human clears it as compliant, lower the risk severity to LOW
+        if override_status_upper == "COMPLIANT":
+            final_severity = "LOW"
+            
+        human_review_meta = {
+            "status_overridden": True,
+            "original_status": result["status"],
+            "new_status": override_status_upper,
+            "reviewer_notes": reviewer_notes or "Status overridden by human compliance auditor.",
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }
+    elif reviewer_notes:
+        human_review_meta = {
+            "status_overridden": False,
+            "reviewer_notes": reviewer_notes,
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }
+
+    # Inject metadata into the report payload for permanent traceability
+    if human_review_meta:
+        result["human_review"] = human_review_meta
+        result["status"] = final_status
+        result["severity"] = final_severity
+
     # Persist the human-approved audit to the ledger
     db_log = AuditLog(
         filename=result.get("filename", "unknown"),
         doc_type=result["doc_type"],
-        status=result["status"],
-        severity=result.get("severity", "HIGH"),
+        status=final_status,
+        severity=final_severity,
         full_report=result
     )
     db.add(db_log)
     db.commit()
     db.refresh(db_log)
 
-    logger.info(f"✅ Human-approved audit saved | Log ID: {db_log.id}")
+    logger.info(f"✅ Human-approved audit saved | Log ID: {db_log.id} | Overridden: {override_status is not None}")
     return {
         "message": "✅ Human approval confirmed. Audit committed to ledger.",
         "log_id": db_log.id,
+        "overridden": override_status is not None,
         "data": result
     }
 
@@ -316,3 +370,40 @@ def get_audit_logs(
     logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(limit).all()
     logger.info(f"📊 Audit log query: returned {len(logs)} record(s)")
     return {"total": len(logs), "logs": logs}
+
+
+@app.get("/api/audit/logs/{log_id}/pdf", tags=["Analytics"])
+def download_pdf_report(
+    log_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Generates and downloads a beautifully formatted corporate PDF audit report
+    for the specified audit log record.
+    """
+    log_record = db.query(AuditLog).filter(AuditLog.id == log_id).first()
+    if not log_record:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Audit log record with ID #{log_id} not found."
+        )
+    
+    try:
+        # Generate the PDF bytes in memory
+        pdf_bytes = PDFReportGenerator.generate_report(log_record)
+        
+        # Stream the raw bytes back to the client
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=audit_report_{log_id}.pdf",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
+        )
+    except Exception as e:
+        logger.error(f"❌ Failed to generate PDF for log #{log_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate PDF report: {str(e)}"
+        )

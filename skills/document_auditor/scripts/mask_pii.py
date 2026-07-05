@@ -30,6 +30,21 @@ import logging
 logger = logging.getLogger("PrivacySkill")
 
 
+def luhn_checksum(card_number: str) -> bool:
+    """Checks if a string of digits is a valid credit card number using the Luhn algorithm."""
+    digits = [int(d) for d in card_number if d.isdigit()]
+    if not digits:
+        return False
+    # Reverse the digits
+    odd_digits = digits[-1::-2]
+    even_digits = digits[-2::-2]
+    total = sum(odd_digits)
+    for d in even_digits:
+        doubled = d * 2
+        total += doubled if doubled < 10 else doubled - 9
+    return total % 10 == 0
+
+
 class PrivacySkill:
     """
     The Zero-Trust PII Redaction Engine.
@@ -67,11 +82,12 @@ class PrivacySkill:
         # Matches Visa (16), MasterCard (16), Amex (15), Discover (16),
         # with or without spaces/dashes between groups.
         # e.g.: 4111 1111 1111 1111, 4111-1111-1111-1111, 4111111111111111
+        # Uses Luhn algorithm to prevent redacting random 14-19 digit numbers (like FSSAI).
         (
             re.compile(
                 r'\b(?:\d[ \-]?){13,18}\d\b'
             ),
-            "[REDACTED_CREDIT_CARD]"
+            lambda m: "[REDACTED_CREDIT_CARD]" if luhn_checksum(m.group(0).replace(" ", "").replace("-", "")) else m.group(0)
         ),
 
         # ── Indian Aadhaar Number (12-digit government UID) ───────────────────
@@ -108,13 +124,9 @@ class PrivacySkill:
         # Note: This runs AFTER Aadhaar to avoid eating 12-digit IDs
         (
             re.compile(
-<<<<<<< HEAD
                 r'\+?\d{1,4}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{4,9}\b'
-=======
-                r'\+?\d{1,3}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{1,4}[\s.\-]?\d{1,9}\b'
->>>>>>> f46007343f32d4e607eec2394fe22e1d729d5051
             ),
-            "[REDACTED_PHONE]"
+            lambda m: "[REDACTED_PHONE]" if not (m.group(0).isdigit() and len(m.group(0)) >= 13) else m.group(0)
         ),
 
     ]

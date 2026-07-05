@@ -48,6 +48,41 @@ from google import genai
 # making it reusable and shareable across any ADK-compatible agent.
 from skills.document_auditor.skill import DocumentAuditorSkill
 
+
+# ── Monkey-Patch Gemini for Automatic 429 Retry handling ─────────────────────
+# Since Google Gemini free tier has strict rate limits (15 RPM), we intercept
+# all model completions and apply exponential backoff retry.
+from google.adk.models.google_llm import Gemini
+original_generate_content_async = Gemini.generate_content_async
+
+async def retrying_generate_content_async(self, llm_request, stream=False):
+    max_retries = 3
+    base_delay = 3.0  # seconds
+    for attempt in range(max_retries):
+        try:
+            # We yield from the original generator method
+            async for response in original_generate_content_async(self, llm_request, stream):
+                yield response
+            return
+        except Exception as e:
+            error_msg = str(e)
+            is_transient = (
+                "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Resource Exhausted" in error_msg or
+                "503" in error_msg or "UNAVAILABLE" in error_msg or "high demand" in error_msg
+            )
+            if is_transient and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logging.getLogger("ComplianceSwarm").warning(
+                    f"⚠️ Transient error/rate limit hit on attempt {attempt + 1}. "
+                    f"Retrying in {delay:.1f} seconds..."
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise e
+
+# Overwrite method globally
+Gemini.generate_content_async = retrying_generate_content_async
+
 # ── Environment & Logging Setup ───────────────────────────────────────────────
 from dotenv import load_dotenv
 load_dotenv()
@@ -55,12 +90,37 @@ load_dotenv()
 logger = logging.getLogger("ComplianceSwarm")
 
 # ── Model Configuration ───────────────────────────────────────────────────────
-# gemini-2.0-flash-lite: Fast, cost-efficient model ideal for structured tasks.
-# It supports JSON mode and Pydantic schemas for deterministic agent outputs.
-GEMINI_MODEL = "gemini-2.0-flash-lite"
+# Fast, cost-efficient model ideal for structured tasks.
+# Can be overridden via env variable GEMINI_MODEL (e.g., gemini-2.5-flash-lite or gemini-2.5-flash)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 # ── Policy File Path ──────────────────────────────────────────────────────────
 POLICY_PATH = os.path.join(os.path.dirname(__file__), "..", "policies", "compliance_rules.json")
+
+
+def extract_json(text: str) -> dict:
+    """Helper to extract JSON object from markdown or raw text."""
+    if not text:
+        return {}
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        first_line_end = cleaned.find("\n")
+        if first_line_end != -1:
+            cleaned = cleaned[first_line_end:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1:
+            try:
+                return json.loads(cleaned[start:end+1])
+            except json.JSONDecodeError:
+                pass
+    return {}
 
 
 # ============================================================
@@ -175,6 +235,14 @@ def build_auditor_agent(model: str | Gemini) -> Agent:
         instruction="""
         You are a strict compliance auditor. You evaluate corporate documents
         against regulatory rules and identify violations.
+        
+        IMPORTANT: You must ONLY evaluate the document against the rules loaded dynamically via the `load_compliance_rules` tool. Do NOT assume, invent, or enforce any rules that are not explicitly defined in the loaded rules list.
+
+        Zero-Trust Redaction Policy:
+        The local security layer redacts sensitive fields to protect data privacy.
+        - A placeholder like `[REDACTED_GSTIN]` represents a valid, format-verified 15-digit GSTIN.
+        - A placeholder like `[REDACTED_PAN]` represents a valid, format-verified 10-character PAN.
+        If a rule requires a GSTIN or PAN to be present or valid, you must treat `[REDACTED_GSTIN]` or `[REDACTED_PAN]` as satisfying that rule (i.e., compliant). Do not flag them as missing or invalid.
 
         WORKFLOW (follow in exact order):
         1. Call the `load_compliance_rules` tool with the document_type you received
@@ -291,6 +359,12 @@ class ComplianceSwarm:
                 model=self.model_name,
                 base_url=self.base_url
             )
+            # Use real Google Gemini API for OCR if a key is available in local mode
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if api_key:
+                self.ocr_client = genai.Client(api_key=api_key)
+            else:
+                self.ocr_client = None
         else:
             self.model_name = GEMINI_MODEL
             self.base_url = None
@@ -302,6 +376,7 @@ class ComplianceSwarm:
                 )
             self.genai_client = genai.Client(api_key=api_key)
             agent_model = GEMINI_MODEL
+            self.ocr_client = self.genai_client
 
         # ── ADK Agent Instantiation ───────────────────────────────────────────
         triage_agent = build_triage_agent(agent_model)
@@ -344,6 +419,27 @@ class ComplianceSwarm:
     # 👁️ OCR AGENT (Agent 0) — Binary File Text Extraction
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _extract_text_from_pdf(self, file_path: str) -> str:
+        """
+        Extracts raw text from a PDF file using the local pypdf library.
+        Allows processing text-based PDFs fully offline without cloud API dependency.
+        """
+        logger.info(f"📄 Local PDF Reader: Extracting text from '{os.path.basename(file_path)}'")
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(file_path)
+            text_parts = []
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+            extracted_text = "\n".join(text_parts)
+            logger.info(f"✅ Local PDF extraction complete: {len(extracted_text)} characters extracted")
+            return extracted_text
+        except Exception as e:
+            logger.error(f"❌ Local PDF extraction failed: {e}")
+            return ""
+
     def _extract_text_via_ocr(self, file_path: str) -> str:
         """
         Extracts raw text from binary files (PDFs, Images) using the Gemini Vision API.
@@ -362,14 +458,20 @@ class ComplianceSwarm:
         """
         logger.info(f"👁️  OCR Agent: Extracting text from '{os.path.basename(file_path)}'")
 
+        if not self.ocr_client:
+            raise ValueError(
+                "OCR required but no GEMINI_API_KEY is configured. "
+                "Please configure GEMINI_API_KEY in your .env file."
+            )
+
         # Upload to Google Files API (temporary storage for multimodal processing)
-        uploaded_file = self.genai_client.files.upload(file=file_path)
+        uploaded_file = self.ocr_client.files.upload(file=file_path)
         logger.info(f"☁️  File uploaded to Google Files API: {uploaded_file.name}")
 
         try:
             # Ask Gemini to extract text exactly as written (no summarization)
-            response = self.genai_client.models.generate_content(
-                model=self.model_name,
+            response = self.ocr_client.models.generate_content(
+                model=GEMINI_MODEL,  # Always use the cloud Gemini model for OCR
                 contents=[
                     uploaded_file,
                     (
@@ -386,7 +488,7 @@ class ComplianceSwarm:
         finally:
             # 🔐 SECURITY: Always delete the file from Google's servers
             # This runs even if extraction fails — Zero-Trust data hygiene
-            self.genai_client.files.delete(name=uploaded_file.name)
+            self.ocr_client.files.delete(name=uploaded_file.name)
             logger.info(f"🗑️  Security: Cloud file '{uploaded_file.name}' deleted immediately")
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -421,8 +523,17 @@ class ComplianceSwarm:
             with open(file_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
             logger.info(f"📄 Plain text file read: {len(raw_text)} characters")
+        elif file_ext == ".pdf":
+            # Try local PDF text extraction first (works completely offline)
+            raw_text = self._extract_text_from_pdf(file_path)
+            
+            # If local PDF extraction returned nothing (e.g. scanned image PDF),
+            # fall back to OCR if a client is available
+            if not raw_text.strip():
+                logger.warning("⚠️ Local PDF text extraction returned no text. Falling back to OCR...")
+                raw_text = self._extract_text_via_ocr(file_path)
         else:
-            # Binary file (PDF/Image): use the OCR Vision Agent
+            # Binary image file: use OCR Vision Agent
             raw_text = self._extract_text_via_ocr(file_path)
 
         if not raw_text or not raw_text.strip():
@@ -442,6 +553,17 @@ class ComplianceSwarm:
         # ── Stage 2: ADK Multi-Agent Pipeline ────────────────────────────────
         # Create a new ADK session for this document audit
         session_id = f"audit_{os.path.basename(file_path).replace('.', '_')}"
+
+        # Ensure session exists in the session service before running the pipeline
+        try:
+            self.session_service.create_session_sync(
+                app_name="SmartDocumentAuditor",
+                user_id="compliance_system",
+                session_id=session_id
+            )
+            logger.info(f"🆕 ADK Session created: {session_id}")
+        except Exception as session_err:
+            logger.debug(f"ℹ️ ADK Session already exists: {session_err}")
 
         logger.info("🤖 Stage 2: Launching ADK SequentialAgent pipeline...")
         logger.info("   → Agent 1 (Triage): Classifying document type...")
@@ -468,8 +590,8 @@ class ComplianceSwarm:
 
         # Run the ADK SequentialAgent pipeline asynchronously
         final_response_text = ""
-        triage_output = {}
-        audit_output = {}
+        triage_output_raw = ""
+        audit_output_raw = ""
 
         async for event in self.runner.run_async(
             user_id="compliance_system",
@@ -479,39 +601,57 @@ class ComplianceSwarm:
                 parts=[genai_types.Part(text=pipeline_prompt)]
             )
         ):
+            # Capture intermediate agent responses to avoid extra API requests
+            if event.content and event.content.parts:
+                part_text = event.content.parts[0].text
+                if part_text:
+                    if event.author == "TriageAgent":
+                        triage_output_raw = part_text
+                    elif event.author == "AuditorAgent":
+                        audit_output_raw = part_text
+
             # Capture the final text response from the last agent (Reporter)
             if event.is_final_response() and event.content and event.content.parts:
                 final_response_text = event.content.parts[0].text
                 logger.info("✅ ADK pipeline completed — final response received")
 
         # ── Stage 3: Result Packaging ─────────────────────────────────────────
-        # Parse structured outputs from agent responses where possible
-        # The Reporter Agent returns Markdown, so we extract key fields
-        # by using the Auditor Agent's structured JSON output directly.
+        # Parse structured outputs directly from the captured agent responses.
+        # This saves 2 expensive LLM API calls per document audit and avoids 429 quota exhaustion.
+        triage_output = extract_json(triage_output_raw)
+        audit_output = extract_json(audit_output_raw)
 
-        # Fallback values if parsing fails
-        doc_type = "unknown"
-        status = "REVIEW_NEEDED"
-        severity = "MEDIUM"
-        violations = []
-        compliance_score = 0
-        recommendations = []
+        doc_type = triage_output.get("doc_type")
+        status = audit_output.get("status")
+        severity = audit_output.get("severity")
+        violations = audit_output.get("violations")
+        compliance_score = audit_output.get("compliance_score")
+        recommendations = audit_output.get("recommendations")
 
-        # Attempt to extract structured data from the pipeline conversation
-        try:
-            # Re-run triage and audit with structured output for reliable parsing
-            triage_output = await self._run_structured_triage(scrubbed_text)
-            audit_output = await self._run_structured_audit(scrubbed_text, triage_output.get("doc_type", "unknown"))
-
-            doc_type = triage_output.get("doc_type", "unknown")
-            status = audit_output.get("status", "REVIEW_NEEDED")
-            severity = audit_output.get("severity", "MEDIUM")
-            violations = audit_output.get("violations", [])
-            compliance_score = audit_output.get("compliance_score", 0)
-            recommendations = audit_output.get("recommendations", [])
-
-        except Exception as parse_error:
-            logger.warning(f"⚠️  Structured parsing fallback triggered: {parse_error}")
+        # Fallback to direct structured model calls ONLY if direct parsing fails
+        if not (doc_type and status and severity):
+            logger.info("⚠️ Direct parsing of agent events returned incomplete data. Triggering structured API fallback...")
+            try:
+                triage_output_fallback = await self._run_structured_triage(scrubbed_text)
+                doc_type = doc_type or triage_output_fallback.get("doc_type", "unknown")
+                
+                audit_output_fallback = await self._run_structured_audit(scrubbed_text, doc_type)
+                status = status or audit_output_fallback.get("status", "REVIEW_NEEDED")
+                severity = severity or audit_output_fallback.get("severity", "MEDIUM")
+                violations = violations or audit_output_fallback.get("violations", [])
+                compliance_score = compliance_score or audit_output_fallback.get("compliance_score", 0)
+                recommendations = recommendations or audit_output_fallback.get("recommendations", [])
+                logger.info("✅ Structured API fallback completed successfully")
+            except Exception as fallback_err:
+                logger.warning(f"⚠️ Structured API fallback failed: {fallback_err}")
+                
+        # Fill absolute fallback defaults if everything fails
+        doc_type = doc_type or "unknown"
+        status = status or "REVIEW_NEEDED"
+        severity = severity or "MEDIUM"
+        violations = violations if violations is not None else []
+        compliance_score = compliance_score if compliance_score is not None else 0
+        recommendations = recommendations if recommendations is not None else []
 
         # Package the complete result
         result = {
@@ -552,19 +692,35 @@ class ComplianceSwarm:
             confidence: float
             reasoning: str
 
-        response = self.genai_client.models.generate_content(
-            model=self.model_name,
-            contents=[
-                "Classify this document. Categories: invoice, certificate, contract, report, unknown.",
-                text[:3000]  # Limit context to avoid token overflow
-            ],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=TriageSchema,
-                temperature=0.1  # Very low temperature for deterministic classification
-            )
-        )
-        return json.loads(response.text)
+        max_retries = 3
+        base_delay = 3.0
+        for attempt in range(max_retries):
+            try:
+                response = self.genai_client.models.generate_content(
+                    model=self.model_name,
+                    contents=[
+                        "Classify this document. Categories: invoice, certificate, contract, report, unknown.",
+                        text[:3000]  # Limit context to avoid token overflow
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=TriageSchema,
+                        temperature=0.1  # Very low temperature for deterministic classification
+                    )
+                )
+                return json.loads(response.text)
+            except Exception as e:
+                error_msg = str(e)
+                is_transient = (
+                    "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Resource Exhausted" in error_msg or
+                    "503" in error_msg or "UNAVAILABLE" in error_msg or "high demand" in error_msg
+                )
+                if is_transient and attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"⚠️ Fallback Triage transient error/rate limit hit. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                else:
+                    raise e
 
     async def _run_structured_audit(self, text: str, doc_type: str) -> dict:
         """
@@ -584,16 +740,38 @@ class ComplianceSwarm:
         rules_data = load_compliance_rules(doc_type)
         rules_text = json.dumps(rules_data.get("rules", []))
 
-        response = self.genai_client.models.generate_content(
-            model=self.model_name,
-            contents=[
-                f"Audit this document against these compliance rules: {rules_text}",
-                text[:3000]
-            ],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=AuditSchema,
-                temperature=0.1
-            )
-        )
-        return json.loads(response.text)
+        max_retries = 3
+        base_delay = 3.0
+        for attempt in range(max_retries):
+            try:
+                response = self.genai_client.models.generate_content(
+                    model=self.model_name,
+                    contents=[
+                        f"Audit this document against these compliance rules: {rules_text}\n\n"
+                        "IMPORTANT: You must ONLY evaluate the document against the provided compliance rules list. Do NOT assume, invent, or enforce any rules that are not explicitly defined in the provided rules list.\n\n"
+                        "Zero-Trust Redaction Policy:\n"
+                        "The local security layer redacts sensitive fields to protect data privacy.\n"
+                        "- A placeholder like `[REDACTED_GSTIN]` represents a valid, format-verified 15-digit GSTIN.\n"
+                        "- A placeholder like `[REDACTED_PAN]` represents a valid, format-verified 10-character PAN.\n"
+                        "If a rule requires a GSTIN or PAN to be present or valid, you must treat `[REDACTED_GSTIN]` or `[REDACTED_PAN]` as satisfying that rule (i.e., compliant). Do not flag them as missing or invalid.",
+                        text[:3000]
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=AuditSchema,
+                        temperature=0.1
+                    )
+                )
+                return json.loads(response.text)
+            except Exception as e:
+                error_msg = str(e)
+                is_transient = (
+                    "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Resource Exhausted" in error_msg or
+                    "503" in error_msg or "UNAVAILABLE" in error_msg or "high demand" in error_msg
+                )
+                if is_transient and attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"⚠️ Fallback Audit transient error/rate limit hit. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                else:
+                    raise e

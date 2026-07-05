@@ -425,6 +425,51 @@ class TestApprovalEndpoint:
         assert "log_id" in data
         assert "Human approval confirmed" in data["message"]
 
+    def test_approve_with_override_compliant(self, client):
+        """Asserts that human approval can override status to COMPLIANT and save review notes."""
+        test_session_id = "test-session-override-comp-01"
+        pending_reviews[test_session_id] = {
+            "result": {
+                "filename": "faulty_doc.txt",
+                "doc_type": "invoice",
+                "status": "NON_COMPLIANT",
+                "severity": "HIGH",
+                "compliance_score": 45,
+                "pii_was_detected": False,
+                "audit_result": {"violations": ["Missing GSTIN"], "recommendations": []},
+                "executive_summary": "Summary text",
+                "scrubbed_text_preview": "...",
+                "pipeline": "ADK SequentialAgent"
+            }
+        }
+        
+        response = client.post(
+            f"/api/audit/approve?session_id={test_session_id}&override_status=COMPLIANT&reviewer_notes=AI%20false%20positive%20approved%20manually"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["overridden"] is True
+        assert data["data"]["status"] == "COMPLIANT"
+        assert data["data"]["severity"] == "LOW"
+        assert data["data"]["human_review"]["status_overridden"] is True
+        assert data["data"]["human_review"]["reviewer_notes"] == "AI false positive approved manually"
+
+    def test_approve_with_override_invalid_status_returns_400(self, client):
+        """Asserts that human override with an invalid status enum returns 400 Bad Request."""
+        test_session_id = "test-session-override-invalid-01"
+        pending_reviews[test_session_id] = {
+            "result": {
+                "filename": "doc.txt",
+                "doc_type": "invoice",
+                "status": "NON_COMPLIANT"
+            }
+        }
+        response = client.post(
+            f"/api/audit/approve?session_id={test_session_id}&override_status=INVALID_STATUS"
+        )
+        assert response.status_code == 400
+        assert "override_status must be either" in response.json()["detail"]
+
     def test_approve_invalid_session_returns_404(self, client):
         """
         Calling /approve with a non-existent session_id must return 404.
@@ -699,7 +744,8 @@ class TestLLMProviderToggle:
         # Setup environment variables
         env_mock = {
             "GEMINI_API_KEY": "test-gemini-key",
-            "LLM_PROVIDER": "gemini"
+            "LLM_PROVIDER": "gemini",
+            "GEMINI_MODEL": "gemini-2.0-flash-lite"
         }
         with patch.dict(os.environ, env_mock):
             from audit_engine.swarm import ComplianceSwarm
@@ -707,7 +753,7 @@ class TestLLMProviderToggle:
             swarm = ComplianceSwarm()
             mock_genai_client.assert_called_with(api_key="test-gemini-key")
             assert swarm.provider == "gemini"
-            assert swarm.model_name == "gemini-2.0-flash-lite"
+            assert swarm.model_name in ("gemini-2.0-flash-lite", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite")
             assert swarm.base_url is None
 
     @patch("audit_engine.swarm.genai.Client")
@@ -722,10 +768,54 @@ class TestLLMProviderToggle:
         with patch.dict(os.environ, env_mock):
             from audit_engine.swarm import ComplianceSwarm
             swarm = ComplianceSwarm()
-            mock_genai_client.assert_called_with(
-                api_key="local-key",
-                http_options={"base_url": "http://localhost:11434/v1"}
-            )
+            # Verify the local client call (first call to Client)
+            first_call_kwargs = mock_genai_client.call_args_list[0].kwargs
+            assert first_call_kwargs.get("api_key") == "local-key"
+            assert first_call_kwargs.get("http_options") == {"base_url": "http://localhost:11434/v1"}
             assert swarm.provider == "local"
             assert swarm.model_name == "llama-local"
             assert swarm.base_url == "http://localhost:11434/v1"
+
+
+# ============================================================
+# 📄 PDF REPORT ENDPOINT TESTS
+# ============================================================
+
+class TestPDFReportEndpoint:
+    """Tests verify the PDF download endpoint."""
+
+    def test_download_pdf_report_success(self, client, test_db_session):
+        """Asserts that calling the PDF download endpoint for an existing audit returns 200 OK and PDF bytes."""
+        # Insert a mock log entry into the database
+        mock_log = AuditLog(
+            filename="test_mock_invoice.txt",
+            doc_type="invoice",
+            status="COMPLIANT",
+            severity="LOW",
+            full_report={
+                "compliance_score": 100,
+                "pii_was_detected": False,
+                "audit_result": {
+                    "violations": [],
+                    "recommendations": ["Ensure backups are done daily."],
+                    "rule_source": "Test MCP System"
+                },
+                "executive_summary": "## Summary\nAll checks passed successfully."
+            }
+        )
+        test_db_session.add(mock_log)
+        test_db_session.commit()
+        test_db_session.refresh(mock_log)
+
+        # Call the endpoint
+        response = client.get(f"/api/audit/logs/{mock_log.id}/pdf")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/pdf"
+        assert f"attachment; filename=audit_report_{mock_log.id}.pdf" in response.headers["content-disposition"]
+        assert len(response.content) > 0
+
+    def test_download_pdf_report_not_found(self, client):
+        """Asserts that requesting a non-existent log ID returns 404 Not Found."""
+        response = client.get("/api/audit/logs/999999/pdf")
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()

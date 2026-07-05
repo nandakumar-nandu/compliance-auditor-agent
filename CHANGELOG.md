@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [v1.5.0] - Intermediary Architecture & Security Update
-*Date: July 2, 2026*
+*Date: June 29, 2026*
 
 ### 📝 Overview
 This release focuses on bridging the gap between the initial prototype and a production-ready enterprise architecture. It addresses critical feedback regarding security, validation, and documentation prior to the full Google ADK migration.
@@ -23,7 +23,7 @@ This release focuses on bridging the gap between the initial prototype and a pro
 
 
 ## [v2.0.0] - Multi-Provider LLM Switch & Logging Aesthetics
-*Date: July 2, 2026*
+*Date: July 1, 2026*
 
 ### 📝 Overview
 This release introduces dynamic LLM provider switching to prevent Google API quota exhaustion. It also refines terminal logging formats to ensure high readability and cleans up repository artifacts for final Kaggle Capstone package submission.
@@ -49,8 +49,8 @@ This release introduces dynamic LLM provider switching to prevent Google API quo
 
 ---
 
-## [v1.5.0] - Intermediary Architecture & Security Update
-*Date: July 2, 2026*
+## [v2.5.0] - Intermediary Architecture & Security Update
+*Date: July 3, 2026*
 
 ### 📝 Overview
 This release focuses on bridging the gap between the initial prototype and a production-ready enterprise architecture. It addresses critical feedback regarding security, validation, and documentation prior to the full Google ADK migration.
@@ -67,3 +67,29 @@ This release focuses on bridging the gap between the initial prototype and a pro
 ### ⚙️ Backend Enhancements
 * **Data Schemas:** Hardened the Pydantic schemas (`TriageResult`, `AuditResult`) to guarantee strict JSON output from the Gemini API.
 * **Persistent Auditing:** Minor enhancements to the `database.py` SQLite ledger to ensure all pipeline events are properly logged.
+
+---
+
+## [v3.0.0] - PDF Reporting, Human Override Governance & Clean Samples
+*Date: July 6, 2026*
+
+### 📝 Overview
+This major release introduces boardroom-ready PDF compliance reports, robust Human-in-the-Loop override capabilities, and standardizes the samples folder to provide exactly one compliant and one non-compliant pair for each document category.
+
+### 📄 Boardroom-Ready PDF Reports
+* **In-Memory PDF Generation:** Created `pdf_generator.py` using `fpdf2` to build beautiful, highly-polished corporate reports with risk indicators, verdict badges, violation tables, and footers.
+* **Unicode Emoji Safety:** Implemented smart translation filters to replace emoji status indicators (like `✅` and `❌`) and smart quotes with standard ASCII equivalents, preventing PDF compilation crashes.
+* **Streamed Endpoint:** Added a `GET /api/audit/logs/{log_id}/pdf` endpoint to retrieve and download reports on-demand directly from the database ledger.
+
+### ⚖️ Human Override Governance
+* **Verdict Modification:** Upgraded `POST /api/audit/approve` to support `override_status` (allowing humans to change the AI's verdict to correct false-positives).
+* **Commentary Auditing:** Added `reviewer_notes` parameter to log human comments, storing override metadata directly in the database audit logs.
+* **Test Coverage:** Added comprehensive unit tests in `test_pipeline.py` verifying status modification and validation inputs.
+
+### 📂 Sample Directory Standardization
+* **Lightweight Test Pairings:** Rebuilt `/samples` folder to contain exactly 1 compliant and 1 non-compliant pair for Invoice, Certificate, Contract, and Report categories (along with 1 raw PII data exposure demo).
+* **Swarm prompt tightening:** Enhanced Auditor Agent Swarm prompts in `swarm.py` to prevent rule hallucinations, ensuring compliant contract and report files pass audits successfully.
+
+### 🛡️ PII Engine Refinements
+* **Luhn Check Filtering:** Implemented a Luhn algorithm check on the Credit Card pattern to prevent redacting valid 14-digit FSSAI numbers as credit cards.
+* **Phone Regex Safeguard:** Modified phone number replacements to ignore contiguous 13+ digit numbers, preventing false-positive redaction of FSSAI and registration IDs.
